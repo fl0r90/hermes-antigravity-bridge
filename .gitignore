@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+.auto_distill_checkpoint
+*.db
+*.log
+.DS_Store

@@ -1,0 +1,14 @@
+[Unit]
+Description=Hermes Antigravity OpenAI Bridge Proxy
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/hermes-antigravity-bridge
+ExecStart=/opt/hermes-antigravity-bridge/.venv/bin/python /opt/hermes-antigravity-bridge/hermes_proxy.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
