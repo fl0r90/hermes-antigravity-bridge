@@ -101,7 +101,7 @@ In your Hermes `config.yaml`:
 ```yaml
 model:
   provider: custom
-  default: taticu-magic
+  default: antigravity-vibe-engine
 
 credentials:
   custom:

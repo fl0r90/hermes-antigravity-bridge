@@ -26,7 +26,7 @@ async def list_models():
     return {
         "object": "list",
         "data": [{
-            "id": "taticu-magic",
+            "id": "antigravity-vibe-engine",
             "object": "model",
             "created": 1700000000,
             "owned_by": "custom"
