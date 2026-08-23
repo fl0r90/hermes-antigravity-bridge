@@ -59,6 +59,7 @@ ALLOWED_TOOL_NAMES = {
 STATIC_PREFIX = os.environ.get("STATIC_SYSTEM_PREFIX", """You are Hermes Agent, a sharp, witty Romanian SysAdmin & DevOps assistant.
 Parlează românește direct, amuzant și fără limbaj corporatrist. Ești genial pe tehnică (Docker, Linux, Proxmox, Media Stack).
 Tools available: [{"name":"terminal","description":"Run shell commands in container","parameters":{"type":"object","properties":{"command":{"type":"string"}}}},{"name":"memory","description":"Manage permanent memory","parameters":{"type":"object","properties":{"action":{"type":"string"},"text":{"type":"string"}}}},{"name":"mempalace_helper","description":"Search or save to MemPalace","parameters":{"type":"object","properties":{"command":{"type":"string"}}}}]
+When analyzing, you can include your thinking in <think>...</think> tags at the very start.
 To call a tool: <tool_call>{"name":"tool_name","arguments":{"key":"val"}}</tool_call>
 Else reply directly.""")
 
@@ -77,7 +78,7 @@ def build_cached_prompt(messages, max_history_messages=8):
     
     for m in recent_chat:
         role = m.get("role", "user")
-        content = m.get("content", "")
+        content = m.get("content", "") or ""
         
         if role == "tool":
             tool_name = m.get("name", "tool")
@@ -86,7 +87,17 @@ def build_cached_prompt(messages, max_history_messages=8):
             prompt_parts.append(f"[Tool Response for {tool_name}]:\n{content}")
         elif role == "assistant" and "tool_calls" in m:
             t_calls = m.get("tool_calls", [])
-            calls_str = "\n".join([f"<tool_call>{json.dumps({name: tc.get(function, {}).get(name, ), arguments: json.loads(tc.get(function, {}).get(arguments, {}))})}</tool_call>" for tc in t_calls])
+            calls_list = []
+            for tc in t_calls:
+                fn = tc.get("function", {})
+                fn_name = fn.get("name", "")
+                raw_args = fn.get("arguments", "{}")
+                try:
+                    parsed_args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                except Exception:
+                    parsed_args = {}
+                calls_list.append(f"<tool_call>{json.dumps({name: fn_name, arguments: parsed_args})}</tool_call>")
+            calls_str = "\n".join(calls_list)
             prompt_parts.append(f"[assistant]:\n{content}\n{calls_str}")
         else:
             prompt_parts.append(f"[{role}]:\n{content}")
@@ -142,7 +153,6 @@ async def chat_completions(request: Request):
             )
             
             full_accumulated = []
-            has_emitted_first = False
             
             async for line in process.stdout:
                 line_str = line.decode("utf-8").strip()
@@ -152,12 +162,9 @@ async def chat_completions(request: Request):
                     ev = json.loads(line_str)
                     ev_type = ev.get("event")
                     
-                    # Handle live thinking / reasoning tokens
                     if ev_type == "step_update" and "step_update" in ev:
                         update = ev["step_update"]
-                        step_t = update.get("step_type")
                         
-                        # Stream thoughts if present
                         if "thinking_delta" in update and update["thinking_delta"]:
                             t_delta = update["thinking_delta"]
                             chunk = {
@@ -173,7 +180,6 @@ async def chat_completions(request: Request):
                             }
                             yield f"data: {json.dumps(chunk)}\n\n"
                             
-                        # Stream text content delta
                         if "text_delta" in update and update["text_delta"]:
                             txt_delta = update["text_delta"]
                             full_accumulated.append(txt_delta)
