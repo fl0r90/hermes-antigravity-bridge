@@ -132,32 +132,70 @@ async def chat_completions(request: Request):
     prompt = build_cached_prompt(messages)
     chosen_model = select_model(prompt)
     
-    process = await asyncio.create_subprocess_exec(
-        AGY_BIN, "--model", chosen_model, "--disable-slash-commands", "-p", prompt, "--output-format", "json", "--dangerously-skip-permissions",
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE
-    )
-    stdout, stderr = await process.communicate()
-    
-    raw_output = stdout.decode("utf-8").strip()
-    full_text = ""
-    in_tok = 0
-    cached_tok = 0
-    try:
-        res_json = json.loads(raw_output)
-        full_text = res_json.get("response", "").strip()
-        in_tok = res_json.get("usage", {}).get("input_tokens", 0)
-        cached_tok = res_json.get("usage", {}).get("cache_read_tokens", 0)
-    except Exception:
-        full_text = raw_output
-        
-    tool_calls = extract_tool_calls(full_text)
-    t_elapsed = round(time.time() - t_start, 2)
-    print(f"[COMPLETION] Model: {chosen_model} | Time: {t_elapsed}s | In Tokens: {in_tok} | Cache Hit: {cached_tok} | Tool Calls: {len(tool_calls)}")
-    
     if stream:
         async def event_generator():
             chunk_id = f"chatcmpl-{int(time.time())}"
+            process = await asyncio.create_subprocess_exec(
+                AGY_BIN, "--model", chosen_model, "--disable-slash-commands", "-p", prompt, "--output-format", "stream-json", "--dangerously-skip-permissions",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            
+            full_accumulated = []
+            has_emitted_first = False
+            
+            async for line in process.stdout:
+                line_str = line.decode("utf-8").strip()
+                if not line_str:
+                    continue
+                try:
+                    ev = json.loads(line_str)
+                    ev_type = ev.get("event")
+                    
+                    # Handle live thinking / reasoning tokens
+                    if ev_type == "step_update" and "step_update" in ev:
+                        update = ev["step_update"]
+                        step_t = update.get("step_type")
+                        
+                        # Stream thoughts if present
+                        if "thinking_delta" in update and update["thinking_delta"]:
+                            t_delta = update["thinking_delta"]
+                            chunk = {
+                                "id": chunk_id,
+                                "object": "chat.completion.chunk",
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": {
+                                        "role": "assistant",
+                                        "reasoning_content": t_delta
+                                    }
+                                }]
+                            }
+                            yield f"data: {json.dumps(chunk)}\n\n"
+                            
+                        # Stream text content delta
+                        if "text_delta" in update and update["text_delta"]:
+                            txt_delta = update["text_delta"]
+                            full_accumulated.append(txt_delta)
+                            chunk = {
+                                "id": chunk_id,
+                                "object": "chat.completion.chunk",
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": {
+                                        "role": "assistant",
+                                        "content": txt_delta
+                                    }
+                                }]
+                            }
+                            yield f"data: {json.dumps(chunk)}\n\n"
+                except Exception:
+                    pass
+                    
+            await process.wait()
+            entire_text = "".join(full_accumulated)
+            tool_calls = extract_tool_calls(entire_text)
+            
             if tool_calls:
                 for tc in tool_calls:
                     chunk = {
@@ -166,13 +204,11 @@ async def chat_completions(request: Request):
                         "choices": [{
                             "index": 0,
                             "delta": {
-                                "role": "assistant",
                                 "tool_calls": [tc]
                             }
                         }]
                     }
                     yield f"data: {json.dumps(chunk)}\n\n"
-                # Signal tool calls stop
                 stop_chunk = {
                     "id": chunk_id,
                     "object": "chat.completion.chunk",
@@ -184,21 +220,6 @@ async def chat_completions(request: Request):
                 }
                 yield f"data: {json.dumps(stop_chunk)}\n\n"
             else:
-                # Text payload chunk
-                chunk = {
-                    "id": chunk_id,
-                    "object": "chat.completion.chunk",
-                    "choices": [{
-                        "index": 0,
-                        "delta": {
-                            "role": "assistant",
-                            "content": full_text
-                        }
-                    }]
-                }
-                yield f"data: {json.dumps(chunk)}\n\n"
-                
-                # Explicit finish_reason stop chunk to prevent continuation loop
                 stop_chunk = {
                     "id": chunk_id,
                     "object": "chat.completion.chunk",
@@ -214,6 +235,21 @@ async def chat_completions(request: Request):
             
         return StreamingResponse(event_generator(), media_type="text/event-stream")
     else:
+        process = await asyncio.create_subprocess_exec(
+            AGY_BIN, "--model", chosen_model, "--disable-slash-commands", "-p", prompt, "--output-format", "json", "--dangerously-skip-permissions",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        stdout, stderr = await process.communicate()
+        raw_output = stdout.decode("utf-8").strip()
+        full_text = ""
+        try:
+            res_json = json.loads(raw_output)
+            full_text = res_json.get("response", "").strip()
+        except Exception:
+            full_text = raw_output
+            
+        tool_calls = extract_tool_calls(full_text)
         msg_obj = {
             "role": "assistant",
             "content": full_text if not tool_calls else None
