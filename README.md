@@ -26,27 +26,27 @@ Meanwhile, subscriptions like Google AI Pro / Antigravity provide massive quotas
 
 ```mermaid
 graph TD
-    User([User on Telegram / Web UI]) -->|Chat / Commands| Hermes[Nous Hermes Agent]
-    Hermes -->|OpenAI API Request + 40 Tools| Bridge[Hermes Antigravity Bridge\n(FastAPI Proxy :8080)]
+    User["User (Telegram / Web UI)"] -->|Chat / Commands| Hermes["Nous Hermes Agent"]
+    Hermes -->|OpenAI API Request + Tools| Bridge["Hermes Antigravity Bridge<br/>(FastAPI Proxy :8080)"]
     
-    subgraph "Hermes Antigravity Bridge Core"
-        Filter[Tool Filter & Minifier\n14k tok ➔ 1.2k tok]
-        Cache[Deterministic Prefix Cacher]
-        Router{Smart Model Router}
+    subgraph Core ["Hermes Antigravity Bridge Core"]
+        Filter["Tool Filter & Minifier<br/>(14k tok to 1.2k tok)"]
+        Cache["Deterministic Prefix Cacher"]
+        Router{"Smart Model Router"}
         Bridge --> Filter --> Cache --> Router
     end
 
-    Router -->|Fast Queries| Flash[Gemini 3.7 Flash Low\n~2.0s latency]
-    Router -->|Deep Code / Architecture| Pro[Gemini 3.1 Pro Low\nDeep Reasoning]
+    Router -->|Fast Queries| Flash["Gemini 3.7 Flash Low<br/>(~2.0s latency)"]
+    Router -->|Deep Code / Architecture| Pro["Gemini 3.1 Pro Low<br/>(Deep Reasoning)"]
     
-    Flash & Pro -->|Antigravity CLI OAuth| Google[Google AI Pro Subscription]
-    Google -->|Response + Tool Calls| Parser[Tool Call Parser & Formatter]
+    Flash & Pro -->|Antigravity CLI OAuth| Google["Google AI Pro Subscription"]
+    Google -->|Response + Tool Calls| Parser["Tool Call Parser & Formatter"]
     Parser --> Hermes
 
-    subgraph "Asynchronous Long-Term Memory (MemPalace)"
-        StateDB[(Hermes state.db\nTelegram & Web Messages)] --> Distill[auto_distill.py Worker\n(Runs every 20 min)]
-        Distill -->|Extract Permanent Facts| FlashWorker[Gemini Flash Distiller]
-        FlashWorker -->|Index & Store| PalaceDB[(MemPalace FTS5 SQLite)]
+    subgraph Memory ["Asynchronous Long-Term Memory (MemPalace)"]
+        StateDB[("Hermes state.db<br/>Telegram & Web Messages")] --> Distill["auto_distill.py Worker<br/>(Runs every 20 min)"]
+        Distill -->|Extract Permanent Facts| FlashWorker["Gemini Flash Distiller"]
+        FlashWorker -->|Index & Store| PalaceDB[("MemPalace FTS5 SQLite")]
         PalaceDB -.->|Active Recall| Hermes
     end
 ```
