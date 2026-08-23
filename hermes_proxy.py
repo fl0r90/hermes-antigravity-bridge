@@ -96,7 +96,8 @@ def build_cached_prompt(messages, max_history_messages=8):
                     parsed_args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
                 except Exception:
                     parsed_args = {}
-                calls_list.append(f"<tool_call>{json.dumps({name: fn_name, arguments: parsed_args})}</tool_call>")
+                call_dict = {"name": fn_name, "arguments": parsed_args}
+                calls_list.append("<tool_call>" + json.dumps(call_dict) + "</tool_call>")
             calls_str = "\n".join(calls_list)
             prompt_parts.append(f"[assistant]:\n{content}\n{calls_str}")
         else:
