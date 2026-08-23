@@ -25,7 +25,7 @@ Meanwhile, subscriptions like Google AI Pro / Antigravity provide massive quotas
 ## 🏗️ Architecture Overview
 
 ```mermaid
-graph TD
+flowchart TD
     User["User (Telegram / Web UI)"] -->|Chat / Commands| Hermes["Nous Hermes Agent"]
     Hermes -->|OpenAI API Request + Tools| Bridge["Hermes Antigravity Bridge<br/>(FastAPI Proxy :8080)"]
     
@@ -33,13 +33,16 @@ graph TD
         Filter["Tool Filter & Minifier<br/>(14k tok to 1.2k tok)"]
         Cache["Deterministic Prefix Cacher"]
         Router{"Smart Model Router"}
-        Bridge --> Filter --> Cache --> Router
+        Bridge --> Filter
+        Filter --> Cache
+        Cache --> Router
     end
 
     Router -->|Fast Queries| Flash["Gemini 3.7 Flash Low<br/>(~2.0s latency)"]
     Router -->|Deep Code / Architecture| Pro["Gemini 3.1 Pro Low<br/>(Deep Reasoning)"]
     
-    Flash & Pro -->|Antigravity CLI OAuth| Google["Google AI Pro Subscription"]
+    Flash -->|Antigravity CLI OAuth| Google["Google AI Pro Subscription"]
+    Pro -->|Antigravity CLI OAuth| Google
     Google -->|Response + Tool Calls| Parser["Tool Call Parser & Formatter"]
     Parser --> Hermes
 
