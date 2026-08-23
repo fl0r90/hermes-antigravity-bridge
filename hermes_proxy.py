@@ -56,8 +56,9 @@ ALLOWED_TOOL_NAMES = {
     "view_file", "mempalace_helper"
 }
 
-STATIC_PREFIX = os.environ.get("STATIC_SYSTEM_PREFIX", """You are Hermes Agent, a sharp, highly competent and direct AI assistant.
-Tools available: [{"name":"terminal","description":"Run shell commands","parameters":{"type":"object","properties":{"command":{"type":"string"}}}},{"name":"memory","description":"Manage persistent memory","parameters":{"type":"object","properties":{"action":{"type":"string"},"text":{"type":"string"}}}},{"name":"mempalace_helper","description":"Search or save to MemPalace","parameters":{"type":"object","properties":{"command":{"type":"string"}}}}]
+STATIC_PREFIX = os.environ.get("STATIC_SYSTEM_PREFIX", """You are Hermes Agent, a sharp, witty Romanian SysAdmin & DevOps assistant.
+Parlează românește direct, amuzant și fără limbaj corporatrist. Ești genial pe tehnică (Docker, Linux, Proxmox, Media Stack).
+Tools available: [{"name":"terminal","description":"Run shell commands in container","parameters":{"type":"object","properties":{"command":{"type":"string"}}}},{"name":"memory","description":"Manage permanent memory","parameters":{"type":"object","properties":{"action":{"type":"string"},"text":{"type":"string"}}}},{"name":"mempalace_helper","description":"Search or save to MemPalace","parameters":{"type":"object","properties":{"command":{"type":"string"}}}}]
 To call a tool: <tool_call>{"name":"tool_name","arguments":{"key":"val"}}</tool_call>
 Else reply directly.""")
 
@@ -85,7 +86,7 @@ def build_cached_prompt(messages, max_history_messages=8):
             prompt_parts.append(f"[Tool Response for {tool_name}]:\n{content}")
         elif role == "assistant" and "tool_calls" in m:
             t_calls = m.get("tool_calls", [])
-            calls_str = "\n".join([f"<tool_call>{json.dumps({'name': tc.get('function', {}).get('name', ''), 'arguments': json.loads(tc.get('function', {}).get('arguments', '{}'))})}</tool_call>" for tc in t_calls])
+            calls_str = "\n".join([f"<tool_call>{json.dumps({name: tc.get(function, {}).get(name, ), arguments: json.loads(tc.get(function, {}).get(arguments, {}))})}</tool_call>" for tc in t_calls])
             prompt_parts.append(f"[assistant]:\n{content}\n{calls_str}")
         else:
             prompt_parts.append(f"[{role}]:\n{content}")
@@ -95,7 +96,7 @@ def build_cached_prompt(messages, max_history_messages=8):
 def select_model(prompt: str) -> str:
     heavy_keywords = ("refactor", "complex architecture", "deep analysis", "write full script", "analiza completa")
     p_lower = prompt.lower()
-    if any(k in p_lower for k in heavy_keywords) or len(prompt) > 8000:
+    if any(k in p_lower for k in heavy_keywords) or len(prompt) > 30000:
         return PRO_MODEL
     return DEFAULT_MODEL
 
@@ -171,7 +172,19 @@ async def chat_completions(request: Request):
                         }]
                     }
                     yield f"data: {json.dumps(chunk)}\n\n"
+                # Signal tool calls stop
+                stop_chunk = {
+                    "id": chunk_id,
+                    "object": "chat.completion.chunk",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "tool_calls"
+                    }]
+                }
+                yield f"data: {json.dumps(stop_chunk)}\n\n"
             else:
+                # Text payload chunk
                 chunk = {
                     "id": chunk_id,
                     "object": "chat.completion.chunk",
@@ -184,6 +197,18 @@ async def chat_completions(request: Request):
                     }]
                 }
                 yield f"data: {json.dumps(chunk)}\n\n"
+                
+                # Explicit finish_reason stop chunk to prevent continuation loop
+                stop_chunk = {
+                    "id": chunk_id,
+                    "object": "chat.completion.chunk",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "stop"
+                    }]
+                }
+                yield f"data: {json.dumps(stop_chunk)}\n\n"
                 
             yield "data: [DONE]\n\n"
             
@@ -208,4 +233,3 @@ async def chat_completions(request: Request):
 
 if __name__ == "__main__":
     uvicorn.run(app, host=HOST, port=PORT, log_level="info")
-EOF'
