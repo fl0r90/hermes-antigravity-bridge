@@ -5,10 +5,12 @@ import sqlite3
 import argparse
 import datetime
 
-DB_PATH = "/root/.hermes/mempalace.db"
-STATE_DB = "/root/.hermes/state.db"
+DEFAULT_HERMES_DIR = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
+DB_PATH = os.environ.get("MEMPALACE_DB", os.path.join(DEFAULT_HERMES_DIR, "mempalace.db"))
+STATE_DB = os.environ.get("STATE_DB", os.path.join(DEFAULT_HERMES_DIR, "state.db"))
 
 def init_db():
+    os.makedirs(os.path.dirname(os.path.abspath(DB_PATH)), exist_ok=True)
     con = sqlite3.connect(DB_PATH)
     cur = con.cursor()
     cur.execute("""
@@ -70,7 +72,7 @@ def search_memory(query):
         
     con.close()
     if not rows:
-        print(f"No memories found matching {query}.")
+        print(f"No memories found matching '{query}'.")
         return
         
     print(f"=== FOUND {len(rows)} RELEVANT MEMORY DRAWERS ===")
@@ -95,7 +97,7 @@ def list_memories():
 
 def get_recent_cross_channel(limit=10):
     if not os.path.exists(STATE_DB):
-        print("state.db not found.")
+        print(f"State database not found at {STATE_DB}")
         return
     con = sqlite3.connect(STATE_DB)
     cur = con.cursor()
@@ -107,7 +109,7 @@ def get_recent_cross_channel(limit=10):
         print("No recent messages found.")
         return
         
-    print(f"=== LAST {len(rows)} MESSAGES ACROSS ALL PLATFORMS (TELEGRAM & WEB) ===")
+    print(f"=== LAST {len(rows)} MESSAGES ACROSS ALL PLATFORMS ===")
     for src, role, content, ts in reversed(rows):
         t_str = datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S") if ts else "N/A"
         clean_c = (content or "").strip().replace("\n", " ")
@@ -116,11 +118,11 @@ def get_recent_cross_channel(limit=10):
         print(f"[{t_str} | {src.upper()} | {role}]: {clean_c}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Hermes MemPalace & Cross-Channel Helper")
+    parser = argparse.ArgumentParser(description="Hermes MemPalace & Cross-Channel Memory Helper")
     sub = parser.add_subparsers(dest="cmd")
     
     p_save = sub.add_parser("save")
-    p_save.add_argument("--wing", default="general", help="Category: infra, devices, fixes, prefs, family")
+    p_save.add_argument("--wing", default="general", help="Category / Wing (infra, devices, fixes, prefs, general)")
     p_save.add_argument("content", help="Verbatim memory content")
     
     p_search = sub.add_parser("search")

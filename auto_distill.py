@@ -5,10 +5,13 @@ import time
 import json
 import sqlite3
 import subprocess
+import shutil
 
-STATE_DB = "/opt/stacks/hermes/data/state.db"
-CHECKPOINT_FILE = "/root/.auto_distill_checkpoint"
-MEMPALACE_HELPER = "/opt/stacks/hermes/data/mempalace_helper.py"
+DEFAULT_HERMES_DIR = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
+STATE_DB = os.environ.get("STATE_DB", os.path.join(DEFAULT_HERMES_DIR, "state.db"))
+CHECKPOINT_FILE = os.environ.get("CHECKPOINT_FILE", os.path.expanduser("~/.auto_distill_checkpoint"))
+MEMPALACE_HELPER = os.environ.get("MEMPALACE_HELPER", os.path.join(os.path.dirname(__file__), "mempalace_helper.py"))
+AGY_BIN = os.environ.get("AGY_BIN", shutil.which("agy") or "/usr/local/bin/agy")
 
 def get_last_checkpoint():
     if os.path.exists(CHECKPOINT_FILE):
@@ -17,7 +20,7 @@ def get_last_checkpoint():
                 return float(f.read().strip())
         except Exception:
             pass
-    return time.time() - 3600 # default last 1h
+    return time.time() - 3600 # default last 1 hour
 
 def save_checkpoint(ts):
     with open(CHECKPOINT_FILE, "w") as f:
@@ -25,6 +28,7 @@ def save_checkpoint(ts):
 
 def run_distillation():
     if not os.path.exists(STATE_DB):
+        print(f"[AUTO-DISTILL] State database not found at {STATE_DB}")
         return
         
     last_ts = get_last_checkpoint()
@@ -41,7 +45,7 @@ def run_distillation():
     max_ts = max(r[3] for r in rows)
     chat_transcript = "\n".join([f"[{r[0].upper()} {r[1]}]: {str(r[2]).strip()}" for r in rows])
     
-    prompt = f"""Analizeaza urmatoarea conversatie recenta si extrage STRICT faptele concrete, dispozitivele, configuratiile tehnice, regulile sau preferintele utilizatorului (Florin) care merita retinute pe termen lung.
+    prompt = f"""Analizeaza urmatoarea conversatie recenta si extrage STRICT faptele concrete, dispozitivele, configuratiile tehnice, regulile sau preferintele utilizatorului care merita retinute pe termen lung.
 Daca este doar conversatie uzuala sau intrebari simple de moment (ex: vreme, glume), raspunde DOAR cu cuvantul: NONE.
 
 Daca gasesti fapte permanente, returneaza-le ca linii separate in formatul:
@@ -51,7 +55,7 @@ Conversatie:
 {chat_transcript}"""
 
     process = subprocess.run(
-        ["/usr/local/bin/agy", "--model", "Gemini 3.7 Flash (Low)", "--disable-slash-commands", "-p", prompt, "--output-format", "json", "--dangerously-skip-permissions"],
+        [AGY_BIN, "--model", "Gemini 3.7 Flash (Low)", "--disable-slash-commands", "-p", prompt, "--output-format", "json", "--dangerously-skip-permissions"],
         capture_output=True,
         text=True
     )
@@ -59,6 +63,7 @@ Conversatie:
     save_checkpoint(max_ts)
     
     if process.returncode != 0:
+        print(f"[AUTO-DISTILL] CLI execution error: {process.stderr}")
         return
         
     raw_out = process.stdout.strip()

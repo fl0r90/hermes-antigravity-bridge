@@ -4,14 +4,21 @@ import time
 import sys
 import os
 import re
+import shutil
 import subprocess
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 import uvicorn
 
-app = FastAPI()
+app = FastAPI(title="Hermes Antigravity Bridge Proxy", version="1.0.0")
 
-# Fast mock endpoints for instant connectivity
+AGY_BIN = os.environ.get("AGY_BIN", shutil.which("agy") or "/usr/local/bin/agy")
+HOST = os.environ.get("HOST", "0.0.0.0")
+PORT = int(os.environ.get("PORT", "8080"))
+DEFAULT_MODEL = os.environ.get("DEFAULT_MODEL", "Gemini 3.7 Flash (Low)")
+PRO_MODEL = os.environ.get("PRO_MODEL", "Gemini 3.1 Pro (Low)")
+
+# Fast mock endpoints for instant connectivity & capability probes
 @app.get("/v1/models")
 @app.get("/api/v1/models")
 @app.get("/models")
@@ -49,17 +56,14 @@ ALLOWED_TOOL_NAMES = {
     "view_file", "mempalace_helper"
 }
 
-# 1. Deterministic System Prefix for 100% Google Prompt Caching
-STATIC_PREFIX = """You are Hermes Agent, a sharp, witty Romanian SysAdmin & DevOps assistant.
-Parlează românește direct, amuzant și fără limbaj corporatrist. Ești genial pe tehnică (Docker, Linux, Proxmox, Media Stack).
-Tools available: [{"name":"terminal","description":"Run shell commands in container","parameters":{"type":"object","properties":{"command":{"type":"string"}}}},{"name":"memory","description":"Manage permanent memory","parameters":{"type":"object","properties":{"action":{"type":"string"},"text":{"type":"string"}}}},{"name":"mempalace_helper","description":"Search or save to MemPalace","parameters":{"type":"object","properties":{"command":{"type":"string"}}}}]
+STATIC_PREFIX = os.environ.get("STATIC_SYSTEM_PREFIX", """You are Hermes Agent, a sharp, highly competent and direct AI assistant.
+Tools available: [{"name":"terminal","description":"Run shell commands","parameters":{"type":"object","properties":{"command":{"type":"string"}}}},{"name":"memory","description":"Manage persistent memory","parameters":{"type":"object","properties":{"action":{"type":"string"},"text":{"type":"string"}}}},{"name":"mempalace_helper","description":"Search or save to MemPalace","parameters":{"type":"object","properties":{"command":{"type":"string"}}}}]
 To call a tool: <tool_call>{"name":"tool_name","arguments":{"key":"val"}}</tool_call>
-Else reply directly."""
+Else reply directly.""")
 
 def build_cached_prompt(messages, max_history_messages=8):
     prompt_parts = [STATIC_PREFIX]
 
-    # Preserve custom system instructions if any
     sys_msgs = [m for m in messages if m.get("role") == "system"]
     non_sys = [m for m in messages if m.get("role") != "system"]
     
@@ -81,7 +85,7 @@ def build_cached_prompt(messages, max_history_messages=8):
             prompt_parts.append(f"[Tool Response for {tool_name}]:\n{content}")
         elif role == "assistant" and "tool_calls" in m:
             t_calls = m.get("tool_calls", [])
-            calls_str = "\n".join([f"<tool_call>{json.dumps({name: tc.get(function, {}).get(name, ), arguments: json.loads(tc.get(function, {}).get(arguments, {}))})}</tool_call>" for tc in t_calls])
+            calls_str = "\n".join([f"<tool_call>{json.dumps({'name': tc.get('function', {}).get('name', ''), 'arguments': json.loads(tc.get('function', {}).get('arguments', '{}'))})}</tool_call>" for tc in t_calls])
             prompt_parts.append(f"[assistant]:\n{content}\n{calls_str}")
         else:
             prompt_parts.append(f"[{role}]:\n{content}")
@@ -89,12 +93,11 @@ def build_cached_prompt(messages, max_history_messages=8):
     return "\n\n".join(prompt_parts)
 
 def select_model(prompt: str) -> str:
-    # Heavy coding keywords trigger Gemini Pro, fast chat uses Gemini Flash
     heavy_keywords = ("refactor", "complex architecture", "deep analysis", "write full script", "analiza completa")
     p_lower = prompt.lower()
     if any(k in p_lower for k in heavy_keywords) or len(prompt) > 8000:
-        return "Gemini 3.1 Pro (Low)"
-    return "Gemini 3.7 Flash (Low)"
+        return PRO_MODEL
+    return DEFAULT_MODEL
 
 def extract_tool_calls(text):
     tool_calls = []
@@ -129,7 +132,7 @@ async def chat_completions(request: Request):
     chosen_model = select_model(prompt)
     
     process = await asyncio.create_subprocess_exec(
-        "/usr/local/bin/agy", "--model", chosen_model, "--disable-slash-commands", "-p", prompt, "--output-format", "json", "--dangerously-skip-permissions",
+        AGY_BIN, "--model", chosen_model, "--disable-slash-commands", "-p", prompt, "--output-format", "json", "--dangerously-skip-permissions",
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE
     )
@@ -204,4 +207,5 @@ async def chat_completions(request: Request):
         })
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8080, log_level="info")
+    uvicorn.run(app, host=HOST, port=PORT, log_level="info")
+EOF'
