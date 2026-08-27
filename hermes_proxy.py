@@ -10,13 +10,13 @@ from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 import uvicorn
 
-app = FastAPI(title="Hermes Antigravity Bridge Proxy", version="1.0.0")
+app = FastAPI(title="Hermes Antigravity Bridge Proxy", version="1.1.0")
 
 AGY_BIN = os.environ.get("AGY_BIN", shutil.which("agy") or "/usr/local/bin/agy")
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8080"))
-DEFAULT_MODEL = os.environ.get("DEFAULT_MODEL", "Gemini 3.7 Flash (Low)")
-PRO_MODEL = os.environ.get("PRO_MODEL", "Gemini 3.1 Pro (Low)")
+DEFAULT_MODEL = os.environ.get("DEFAULT_MODEL", "Gemini 3.6 Flash (High)")
+PRO_MODEL = os.environ.get("PRO_MODEL", "Gemini 3.1 Pro (High)")
 
 # Fast mock endpoints for instant connectivity & capability probes
 @app.get("/v1/models")
@@ -43,12 +43,15 @@ async def get_model(model_name: str):
     }
 
 @app.get("/version")
-@app.get("/api/tags")
+@app.get("/api/version")
+async def version():
+    return {"version": "1.1.0", "status": "running"}
+
 @app.get("/props")
 @app.get("/v1/props")
 @app.post("/api/show")
 async def mock_ok():
-    return {"status": "ok", "version": "1.0.0"}
+    return {"status": "ok", "version": "1.1.0"}
 
 ALLOWED_TOOL_NAMES = {
     "terminal", "memory", "session_search", "web_search", 
@@ -63,7 +66,7 @@ When analyzing, you can include your thinking in <think>...</think> tags at the 
 To call a tool: <tool_call>{"name":"tool_name","arguments":{"key":"val"}}</tool_call>
 Else reply directly.""")
 
-def build_cached_prompt(messages, max_history_messages=8):
+def build_cached_prompt(messages, max_history_messages=10):
     prompt_parts = [STATIC_PREFIX]
 
     sys_msgs = [m for m in messages if m.get("role") == "system"]
@@ -83,7 +86,7 @@ def build_cached_prompt(messages, max_history_messages=8):
         if role == "tool":
             tool_name = m.get("name", "tool")
             if len(content) > 1500:
-                content = content[:1000] + f"\n...[Truncated {len(content)-1000} chars]..."
+                content = content[:800] + f"\n...[Truncated {len(content)-1300} chars]...\n" + content[-500:]
             prompt_parts.append(f"[Tool Response for {tool_name}]:\n{content}")
         elif role == "assistant" and "tool_calls" in m:
             t_calls = m.get("tool_calls", [])
@@ -106,9 +109,9 @@ def build_cached_prompt(messages, max_history_messages=8):
     return "\n\n".join(prompt_parts)
 
 def select_model(prompt: str) -> str:
-    heavy_keywords = ("refactor", "complex architecture", "deep analysis", "write full script", "analiza completa")
+    heavy_keywords = ("refactor", "complex architecture", "deep analysis", "write full script", "analiza arhitectura")
     p_lower = prompt.lower()
-    if any(k in p_lower for k in heavy_keywords) or len(prompt) > 30000:
+    if any(k in p_lower for k in heavy_keywords):
         return PRO_MODEL
     return DEFAULT_MODEL
 
@@ -134,6 +137,53 @@ def extract_tool_calls(text):
             pass
     return tool_calls
 
+async def run_agy_prompt(prompt: str, model_name: str, timeout_str: str = "10m") -> tuple[str, bool]:
+    """Runs the AGY CLI with given model and timeout, returns (response_text, is_success)."""
+    cmd = [
+        AGY_BIN,
+        "--model", model_name,
+        "--print-timeout", timeout_str,
+        "--disable-slash-commands",
+        "-p", prompt,
+        "--output-format", "json",
+        "--dangerously-skip-permissions"
+    ]
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        stdout, stderr = await process.communicate()
+        raw_output = stdout.decode("utf-8", errors="replace").strip()
+        err_output = stderr.decode("utf-8", errors="replace").strip()
+        
+        if not raw_output:
+            with open("/tmp/proxy_debug.log", "a") as f:
+                f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] EMPTY STDOUT (Model {model_name}). STDERR: {err_output}\n")
+            return "", False
+            
+        try:
+            res_json = json.loads(raw_output)
+            status = res_json.get("status", "")
+            resp_text = res_json.get("response", "").strip()
+            
+            if status == "SUCCESS" and resp_text:
+                return resp_text, True
+            elif status == "ERROR":
+                err_msg = res_json.get("error", "unknown error")
+                with open("/tmp/proxy_debug.log", "a") as f:
+                    f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] AGY ERROR (Model {model_name}): {err_msg} | RAW: {raw_output}\n")
+                return resp_text, False
+            else:
+                return resp_text, bool(resp_text)
+        except Exception:
+            return raw_output, bool(raw_output)
+    except Exception as e:
+        with open("/tmp/proxy_debug.log", "a") as f:
+            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] SUBPROCESS EXCEPTION (Model {model_name}): {str(e)}\n")
+        return "", False
+
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
     t_start = time.time()
@@ -144,28 +194,44 @@ async def chat_completions(request: Request):
     prompt = build_cached_prompt(messages)
     chosen_model = select_model(prompt)
     
-    # Always execute CLI reliably with JSON output
-    process = await asyncio.create_subprocess_exec(
-        AGY_BIN, "--model", chosen_model, "--disable-slash-commands", "-p", prompt, "--output-format", "json", "--dangerously-skip-permissions",
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE
-    )
-    stdout, stderr = await process.communicate()
-    raw_output = stdout.decode("utf-8").strip()
-    full_text = ""
-    try:
-        res_json = json.loads(raw_output)
-        full_text = res_json.get("response", "").strip()
-    except Exception:
-        full_text = raw_output
+    # 1. First attempt with chosen model
+    full_text, success = await run_agy_prompt(prompt, chosen_model, timeout_str="10m")
+    effective_model = chosen_model
+    
+    # 2. Fallback to Flash if Pro failed or returned empty
+    if (not success or not full_text.strip()) and chosen_model != DEFAULT_MODEL:
+        print(f"[FALLBACK] Model {chosen_model} failed or timed out. Retrying with {DEFAULT_MODEL}...")
+        full_text, success = await run_agy_prompt(prompt, DEFAULT_MODEL, timeout_str="8m")
+        effective_model = f"{chosen_model}->FALLBACK({DEFAULT_MODEL})"
+        
+    # 3. Emergency fallback if still empty (ensures stream never closes abruptly with 0 bytes)
+    if not full_text.strip():
+        full_text = "Boss, m-am sincopat o secundă pe conexiune, dar sunt în picioare. Reîncearcă comanda sau dă-i un ping scurt!"
+        print(f"[EMERGENCY-RESPONSE] Sent keep-alive fallback response.")
         
     tool_calls = extract_tool_calls(full_text)
     t_elapsed = round(time.time() - t_start, 2)
-    print(f"[COMPLETION] Time: {t_elapsed}s | Tool Calls: {len(tool_calls)} | Text len: {len(full_text)}")
+    print(f"[COMPLETION] Model: {effective_model} | Time: {t_elapsed}s | Tool Calls: {len(tool_calls)} | Text len: {len(full_text)}")
     
     if stream:
         async def event_generator():
             chunk_id = f"chatcmpl-{int(time.time())}"
+            
+            # Stream the text content chunk if present
+            if full_text:
+                chunk = {
+                    "id": chunk_id,
+                    "object": "chat.completion.chunk",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "content": full_text
+                        }
+                    }]
+                }
+                yield f"data: {json.dumps(chunk)}\n\n"
+
             if tool_calls:
                 for tc in tool_calls:
                     chunk = {
@@ -191,20 +257,6 @@ async def chat_completions(request: Request):
                 }
                 yield f"data: {json.dumps(stop_chunk)}\n\n"
             else:
-                # Stream the full text content chunk
-                chunk = {
-                    "id": chunk_id,
-                    "object": "chat.completion.chunk",
-                    "choices": [{
-                        "index": 0,
-                        "delta": {
-                            "role": "assistant",
-                            "content": full_text
-                        }
-                    }]
-                }
-                yield f"data: {json.dumps(chunk)}\n\n"
-                
                 stop_chunk = {
                     "id": chunk_id,
                     "object": "chat.completion.chunk",
@@ -222,7 +274,7 @@ async def chat_completions(request: Request):
     else:
         msg_obj = {
             "role": "assistant",
-            "content": full_text if not tool_calls else None
+            "content": full_text
         }
         if tool_calls:
             msg_obj["tool_calls"] = tool_calls
