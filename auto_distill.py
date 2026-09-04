@@ -55,7 +55,7 @@ Conversatie:
 {chat_transcript}"""
 
     process = subprocess.run(
-        [AGY_BIN, "--model", "Gemini 3.7 Flash (Low)", "--disable-slash-commands", "-p", prompt, "--output-format", "json", "--dangerously-skip-permissions"],
+        [AGY_BIN, "--model", "Gemini 3.8 Flash (Low)", "--disable-slash-commands", "-p", prompt, "--output-format", "json", "--dangerously-skip-permissions"],
         capture_output=True,
         text=True
     )

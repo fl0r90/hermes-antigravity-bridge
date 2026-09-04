@@ -15,7 +15,7 @@ app = FastAPI(title="Hermes Antigravity Bridge Proxy", version="1.1.0")
 AGY_BIN = os.environ.get("AGY_BIN", shutil.which("agy") or "/usr/local/bin/agy")
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8080"))
-DEFAULT_MODEL = os.environ.get("DEFAULT_MODEL", "Gemini 3.6 Flash (High)")
+DEFAULT_MODEL = os.environ.get("DEFAULT_MODEL", "Gemini 3.8 Flash (Low)")
 PRO_MODEL = os.environ.get("PRO_MODEL", "Gemini 3.1 Pro (High)")
 
 # Fast mock endpoints for instant connectivity & capability probes
@@ -66,8 +66,29 @@ When analyzing, you can include your thinking in <think>...</think> tags at the 
 To call a tool: <tool_call>{"name":"tool_name","arguments":{"key":"val"}}</tool_call>
 Else reply directly.""")
 
-def build_cached_prompt(messages, max_history_messages=10):
-    prompt_parts = [STATIC_PREFIX]
+def build_cached_prompt(messages, tools=None, max_history_messages=10):
+    prompt_parts = []
+    
+    # Dynamic tools injection if tools provided by Hermes
+    custom_tools_desc = ""
+    if tools and isinstance(tools, list):
+        filtered_tools = []
+        for t in tools:
+            fn = t.get("function", {})
+            t_name = fn.get("name", "")
+            # Skip heavy cloud tools if any, keep local and useful tools
+            if any(bad in t_name.lower() for bad in ("feishu", "wechat", "lark", "dingtalk")):
+                continue
+            filtered_tools.append({
+                "name": t_name,
+                "description": fn.get("description", "")[:120],
+                "parameters": fn.get("parameters", {})
+            })
+        if filtered_tools:
+            custom_tools_desc = f"\nActive Tools available: {json.dumps(filtered_tools)}"
+
+    base_prefix = STATIC_PREFIX + custom_tools_desc
+    prompt_parts.append(base_prefix)
 
     sys_msgs = [m for m in messages if m.get("role") == "system"]
     non_sys = [m for m in messages if m.get("role") != "system"]
@@ -108,14 +129,22 @@ def build_cached_prompt(messages, max_history_messages=10):
             
     return "\n\n".join(prompt_parts)
 
-def select_model(prompt: str) -> str:
+def select_model(prompt: str, client_requested_model: str = "") -> tuple[str, str]:
+    """Returns (model_name, timeout_str). Allows client override or smart keyword routing."""
+    req = (client_requested_model or "").lower()
+    if "pro" in req:
+        return PRO_MODEL, "15m"
+    if "flash" in req:
+        return DEFAULT_MODEL, "3m"
+        
     heavy_keywords = ("refactor", "complex architecture", "deep analysis", "write full script", "analiza arhitectura")
     p_lower = prompt.lower()
     if any(k in p_lower for k in heavy_keywords):
-        return PRO_MODEL
-    return DEFAULT_MODEL
+        return PRO_MODEL, "15m"
+    return DEFAULT_MODEL, "3m"
 
-def extract_tool_calls(text):
+def extract_tool_calls(text: str) -> tuple[list, str]:
+    """Extracts tool calls and returns (tool_calls, cleaned_text_without_xml)."""
     tool_calls = []
     matches = list(re.finditer(r"<tool_call>\s*(.*?)\s*</tool_call>", text, re.DOTALL))
     for i, m in enumerate(matches):
@@ -135,7 +164,19 @@ def extract_tool_calls(text):
             })
         except Exception:
             pass
-    return tool_calls
+            
+    # Clean tool calls from the user-facing content to prevent session corruption
+    cleaned_text = re.sub(r"<tool_call>\s*.*?\s*</tool_call>", "", text, flags=re.DOTALL).strip()
+    return tool_calls, cleaned_text
+
+def extract_reasoning(text: str) -> tuple[str, str]:
+    """Separates <think>...</think> from main content."""
+    reasoning = ""
+    m = re.search(r"<think>\s*(.*?)\s*</think>", text, re.DOTALL)
+    if m:
+        reasoning = m.group(1).strip()
+        text = re.sub(r"<think>\s*.*?\s*</think>", "", text, flags=re.DOTALL).strip()
+    return reasoning, text
 
 async def run_agy_prompt(prompt: str, model_name: str, timeout_str: str = "10m") -> tuple[str, bool]:
     """Runs the AGY CLI with given model and timeout, returns (response_text, is_success)."""
@@ -189,96 +230,101 @@ async def chat_completions(request: Request):
     t_start = time.time()
     data = await request.json()
     messages = data.get("messages", [])
+    tools = data.get("tools", None)
     stream = data.get("stream", False)
+    client_model = data.get("model", "")
     
-    prompt = build_cached_prompt(messages)
-    chosen_model = select_model(prompt)
-    
-    # 1. First attempt with chosen model
-    full_text, success = await run_agy_prompt(prompt, chosen_model, timeout_str="10m")
-    effective_model = chosen_model
-    
-    # 2. Fallback to Flash if Pro failed or returned empty
-    if (not success or not full_text.strip()) and chosen_model != DEFAULT_MODEL:
-        print(f"[FALLBACK] Model {chosen_model} failed or timed out. Retrying with {DEFAULT_MODEL}...")
-        full_text, success = await run_agy_prompt(prompt, DEFAULT_MODEL, timeout_str="8m")
-        effective_model = f"{chosen_model}->FALLBACK({DEFAULT_MODEL})"
-        
-    # 3. Emergency fallback if still empty (ensures stream never closes abruptly with 0 bytes)
-    if not full_text.strip():
-        full_text = "Boss, m-am sincopat o secundă pe conexiune, dar sunt în picioare. Reîncearcă comanda sau dă-i un ping scurt!"
-        print(f"[EMERGENCY-RESPONSE] Sent keep-alive fallback response.")
-        
-    tool_calls = extract_tool_calls(full_text)
-    t_elapsed = round(time.time() - t_start, 2)
-    print(f"[COMPLETION] Model: {effective_model} | Time: {t_elapsed}s | Tool Calls: {len(tool_calls)} | Text len: {len(full_text)}")
+    prompt = build_cached_prompt(messages, tools=tools)
+    chosen_model, initial_timeout = select_model(prompt, client_requested_model=client_model)
     
     if stream:
         async def event_generator():
             chunk_id = f"chatcmpl-{int(time.time())}"
+            task = asyncio.create_task(run_agy_prompt(prompt, chosen_model, timeout_str=initial_timeout))
             
-            # Stream the text content chunk if present
-            if full_text:
-                chunk = {
-                    "id": chunk_id,
-                    "object": "chat.completion.chunk",
-                    "choices": [{
-                        "index": 0,
-                        "delta": {
-                            "role": "assistant",
-                            "content": full_text
-                        }
-                    }]
-                }
-                yield f"data: {json.dumps(chunk)}\n\n"
-
+            # Keep-alive loop: while the model is thinking / working (even 10+ minutes),
+            # send SSE comment pings every 12 seconds so Telegram/browsers don't drop the connection
+            while not task.done():
+                await asyncio.sleep(12)
+                if not task.done():
+                    yield f": keep-alive ping {int(time.time())}\n\n"
+                    
+            full_text, success = await task
+            effective_model = chosen_model
+            
+            # Fallback to Flash if Pro failed or returned empty
+            if (not success or not full_text.strip()) and chosen_model != DEFAULT_MODEL:
+                print(f"[FALLBACK] Model {chosen_model} failed. Retrying with {DEFAULT_MODEL}...")
+                fallback_task = asyncio.create_task(run_agy_prompt(prompt, DEFAULT_MODEL, timeout_str="5m"))
+                while not fallback_task.done():
+                    await asyncio.sleep(12)
+                    if not fallback_task.done():
+                        yield f": keep-alive ping {int(time.time())}\n\n"
+                full_text, success = await fallback_task
+                effective_model = f"{chosen_model}->FALLBACK({DEFAULT_MODEL})"
+                
+            if not full_text.strip():
+                full_text = "Boss, a durat ceva dar sunt pe baricade. Mai dă o dată comanda sau un ping scurt!"
+                
+            tool_calls, clean_text = extract_tool_calls(full_text)
+            reasoning, clean_text = extract_reasoning(clean_text)
+            
+            t_elapsed = round(time.time() - t_start, 2)
+            print(f"[COMPLETION-STREAM] Model: {effective_model} | Time: {t_elapsed}s | Tool Calls: {len(tool_calls)} | Text len: {len(clean_text)}")
+            
+            # If reasoning exists, we can yield it
+            if reasoning:
+                yield f"data: {json.dumps({'id': chunk_id, 'object': 'chat.completion.chunk', 'choices': [{'index': 0, 'delta': {'role': 'assistant', 'content': f'<think>{reasoning}</think>\n'}}]})}\n\n"
+                
+            # Yield user-facing cleaned text
+            if clean_text:
+                yield f"data: {json.dumps({'id': chunk_id, 'object': 'chat.completion.chunk', 'choices': [{'index': 0, 'delta': {'role': 'assistant', 'content': clean_text}}]})}\n\n"
+                
+            # Yield tool calls if any
             if tool_calls:
                 for tc in tool_calls:
-                    chunk = {
-                        "id": chunk_id,
-                        "object": "chat.completion.chunk",
-                        "choices": [{
-                            "index": 0,
-                            "delta": {
-                                "role": "assistant",
-                                "tool_calls": [tc]
-                            }
-                        }]
-                    }
-                    yield f"data: {json.dumps(chunk)}\n\n"
-                stop_chunk = {
-                    "id": chunk_id,
-                    "object": "chat.completion.chunk",
-                    "choices": [{
-                        "index": 0,
-                        "delta": {},
-                        "finish_reason": "tool_calls"
-                    }]
-                }
-                yield f"data: {json.dumps(stop_chunk)}\n\n"
+                    yield f"data: {json.dumps({'id': chunk_id, 'object': 'chat.completion.chunk', 'choices': [{'index': 0, 'delta': {'role': 'assistant', 'tool_calls': [tc]}}]})}\n\n"
+                yield f"data: {json.dumps({'id': chunk_id, 'object': 'chat.completion.chunk', 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'tool_calls'}]})}\n\n"
             else:
-                stop_chunk = {
-                    "id": chunk_id,
-                    "object": "chat.completion.chunk",
-                    "choices": [{
-                        "index": 0,
-                        "delta": {},
-                        "finish_reason": "stop"
-                    }]
-                }
-                yield f"data: {json.dumps(stop_chunk)}\n\n"
+                yield f"data: {json.dumps({'id': chunk_id, 'object': 'chat.completion.chunk', 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
                 
             yield "data: [DONE]\n\n"
             
         return StreamingResponse(event_generator(), media_type="text/event-stream")
+        
     else:
-        msg_obj = {
-            "role": "assistant",
-            "content": full_text
-        }
+        # Non-streaming request
+        full_text, success = await run_agy_prompt(prompt, chosen_model, timeout_str=initial_timeout)
+        effective_model = chosen_model
+        
+        if (not success or not full_text.strip()) and chosen_model != DEFAULT_MODEL:
+            print(f"[FALLBACK] Model {chosen_model} failed. Retrying with {DEFAULT_MODEL}...")
+            full_text, success = await run_agy_prompt(prompt, DEFAULT_MODEL, timeout_str="5m")
+            effective_model = f"{chosen_model}->FALLBACK({DEFAULT_MODEL})"
+            
+        if not full_text.strip():
+            full_text = "Boss, m-am sincopat o secundă pe conexiune, dar sunt în picioare. Reîncearcă comanda sau dă-i un ping scurt!"
+            
+        tool_calls, clean_text = extract_tool_calls(full_text)
+        reasoning, clean_text = extract_reasoning(clean_text)
+        
+        # If there is clean text, attach it, else keep minimal explanation
+        final_content = f"<think>{reasoning}</think>\n{clean_text}".strip() if reasoning else clean_text
+        if not final_content and tool_calls:
+            final_content = None
+            
+        msg_obj = {"role": "assistant"}
+        if final_content:
+            msg_obj["content"] = final_content
+        else:
+            msg_obj["content"] = ""
+            
         if tool_calls:
             msg_obj["tool_calls"] = tool_calls
             
+        t_elapsed = round(time.time() - t_start, 2)
+        print(f"[COMPLETION-SYNC] Model: {effective_model} | Time: {t_elapsed}s | Tool Calls: {len(tool_calls)} | Text len: {len(clean_text)}")
+        
         return JSONResponse({
             "id": f"chatcmpl-{int(time.time())}",
             "object": "chat.completion",
