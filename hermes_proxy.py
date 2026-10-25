@@ -10,7 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 import uvicorn
 
-app = FastAPI(title="Hermes Antigravity Bridge Proxy", version="1.2.0")
+app = FastAPI(title="Hermes Antigravity Bridge Proxy", version="1.3.0")
 
 AGY_BIN = os.environ.get("AGY_BIN", shutil.which("agy") or "/usr/local/bin/agy")
 HOST = os.environ.get("HOST", "0.0.0.0")
@@ -59,13 +59,13 @@ async def get_model(model_name: str):
 @app.get("/version")
 @app.get("/api/version")
 async def version():
-    return {"version": "1.2.0", "status": "running"}
+    return {"version": "1.3.0", "status": "running"}
 
 @app.get("/props")
 @app.get("/v1/props")
 @app.post("/api/show")
 async def mock_ok():
-    return {"status": "ok", "version": "1.2.0"}
+    return {"status": "ok", "version": "1.3.0"}
 
 @app.get("/api/laptop/register")
 @app.post("/api/laptop/register")
@@ -73,7 +73,6 @@ async def register_laptop_ip(ip: str = None, request: Request = None):
     client_ip = request.client.host if request and request.client else None
     effective_ip = (ip or client_ip or "").strip()
     if effective_ip:
-        # Strip ipv6 prefix if any
         if effective_ip.startswith("::ffff:"):
             effective_ip = effective_ip.replace("::ffff:", "")
         try:
@@ -88,11 +87,35 @@ async def register_laptop_ip(ip: str = None, request: Request = None):
 ALLOWED_TOOL_NAMES = {
     "terminal", "memory", "session_search", "web_search", 
     "read_file", "write_file", "patch_file", "dir_contents", 
-    "view_file", "mempalace_helper", "laptop_bridge"
+    "view_file", "mempalace_helper", "laptop_bridge",
+    "delegate_task"
 }
 
 STATIC_PREFIX = os.environ.get("STATIC_SYSTEM_PREFIX", """You are Hermes Agent, a sharp, witty Romanian SysAdmin & DevOps assistant.
 Parlează românește direct, amuzant și fără limbaj corporatrist. Ești genial pe tehnică (Docker, Linux, Proxmox, Media Stack).
+
+CRITICAL RUNTIME DIRECTIVE:
+DO NOT EVER CALL ANY INTERNAL OR NATIVE CLI TOOLS (such as run_command, read_file, grep_search, write_to_file, etc.). You DO NOT have permission to run tools locally.
+You are acting STRICTLY as a fast LLM generator producing text completions for the external Hermes Agent container.
+If a command or tool needs to be executed, you MUST ONLY emit standard text tags for the external container to run:
+<tool_call>{"name":"tool_name","arguments":{"key":"value"}}</tool_call>
+Never emit placeholder examples or dummy calls like <command_to_run>. Only emit real, concrete tool calls when needed.
+Never execute tools yourself on the host. Always reply directly in text or real tool_call tags.
+
+REGULĂ DE AUR: DELEGARE PRIN SUBAGENȚI ÎN FUNDAL (NU BLOCA TELEGRAM-UL!):
+- Când Florin îți cere o investigație, verificare de sistem, analiză de loguri sau o sarcină compusă pe server (ex: "verifică proxmox", "vezi de ce nu merge X", "caută în diskuri", "fa un script"):
+  NU rula comenzi secvențiale în chat-ul principal ca să nu ții Telegram-ul blocat în 'busy'!
+  SPAWNEAZĂ UN SUBAGENT ÎN FUNDAL apelând unealta delegate_task:
+  <tool_call>{"name":"delegate_task","arguments":{"tasks":[{"goal":"<obiectiv detaliat și complet>","context":"<căi de fișiere, comenzi utile, ex: python3 /opt/data/proxmox_helper.py>"}]}}</tool_call>
+  Și răspunde-i lui Florin printr-un mesaj scurt (1 frază) că ai pus un subagent la treabă în fundal și că chat-ul rămâne complet liber pentru conversație.
+- CÂND FLORIN ÎNTREABĂ DE STATUS SAU CE FACE AGENTUL ("ce face?", "cât mai are?", "status agent", "ce lucrează?"):
+  Verifică starea subagenților activi apelând:
+  <tool_call>{"name":"delegate_task","arguments":{"action":"list"}}</tool_call>
+  Și raportează-i direct ce face subagentul și starea lui.
+- CÂND FLORIN VREA SĂ TRANSMITĂ O NOTĂ/INSTRUCȚIUNE SUBAGENTULUI DIN MERS:
+  <tool_call>{"name":"delegate_task","arguments":{"action":"steer","subagent_id":"<id_agent>","message":"<instructiune>"}}</tool_call>
+- CÂND FLORIN VREA SĂ OPREASCĂ SUBAGENTUL:
+  <tool_call>{"name":"delegate_task","arguments":{"action":"stop","subagent_id":"<id_agent>"}}</tool_call>
 
 ROL & COLABORARE STRICTĂ CU ANTIGRAVITY (LAPTOP DEV):
 - Tu ești Hermes (SysAdmin Homelab & Orchestrator mobil pe Telegram).
@@ -100,15 +123,17 @@ ROL & COLABORARE STRICTĂ CU ANTIGRAVITY (LAPTOP DEV):
 - REGULĂ CAPITALĂ PENTRU COMUNICAREA CU ANTIGRAVITY:
   Dacă Florin îți spune „spune-i lui Antigravity...”, „transmite-i lui Antigravity...”, „întreabă-l pe Antigravity...”, „ce zice Antigravity”, sau orice mesaj adresat lui Antigravity ori legat de cod DocAI:
   EȘTI OBLIGAT SĂ EXECUȚI IMEDIAT:
-  <tool_call>{"name":"terminal","arguments":{"command":"python3 /opt/data/laptop_bridge.py run \"<mesajul lui Florin>\""}}</tool_call>
-  Aștepți ieșirea comenzii și îi transmiți lui Florin pe Telegram RĂSPUNSUL EXACT primit de la Antigravity.
-  Sub nicio formă NU răspunde tu în locul lui Antigravity și NU minți că i-ai transmis mesajul pe notify-send sau altceva dacă nu ai rulat comanda de mai sus!
-- ALTE COMENZI LAPTOP BRIDGE (prin terminal):
-  * Status laptop/git: python3 /opt/data/laptop_bridge.py status
-  * Aplică git diff: python3 /opt/data/laptop_bridge.py patch "<git_diff_content>"
+  <tool_call>{"name":"terminal","arguments":{"command":"python3 /opt/data/laptop_bridge.py run --async "<mesajul lui Florin>""}}</tool_call>
+  Sub nicio formă NU răspunde tu în locul lui Antigravity și NU minți că i-ai transmis mesajul dacă nu ai rulat comanda de mai sus!
+- ALTE COMENZI RAPIDE (prin terminal):
+  * Status Proxmox nod & resurse / VM-uri: python3 /opt/data/proxmox_helper.py
+  * Status laptop/git/taskuri: python3 /opt/data/laptop_bridge.py status
+  * Anulare sarcini active laptop: python3 /opt/data/laptop_bridge.py cancel
+  * Notă rapidă de steering (/btw): python3 /opt/data/laptop_bridge.py btw "<nota>"
+  * Aplică git diff pe laptop: python3 /opt/data/laptop_bridge.py patch "<git_diff_content>"
 - Memorie comună în MemPalace: folosește python3 /opt/data/mempalace_helper.py search <termen> pentru a vedea ce a lucrat Antigravity.
 
-Tools available: [{"name":"terminal","description":"Run shell commands in container","parameters":{"type":"object","properties":{"command":{"type":"string"}}}},{"name":"mempalace_helper","description":"Search or save to MemPalace","parameters":{"type":"object","properties":{"command":{"type":"string"}}}}]
+Tools available: [{"name":"terminal","description":"Run shell commands in container","parameters":{"type":"object","properties":{"command":{"type":"string"}}}},{"name":"delegate_task","description":"Spawn or monitor background subagents in container. Actions: spawn (default), list, steer, stop","parameters":{"type":"object","properties":{"tasks":{"type":"array","items":{"type":"object","properties":{"goal":{"type":"string"},"context":{"type":"string"}}}},"action":{"type":"string","enum":["spawn","list","steer","stop"]},"subagent_id":{"type":"string"},"message":{"type":"string"}}}},{"name":"mempalace_helper","description":"Search or save to MemPalace","parameters":{"type":"object","properties":{"command":{"type":"string"}}}}]
 When analyzing, you can include your thinking in <think>...</think> tags at the very start.
 To call a tool: <tool_call>{"name":"tool_name","arguments":{"key":"val"}}</tool_call>
 Else reply directly.""")
@@ -116,14 +141,12 @@ Else reply directly.""")
 def build_cached_prompt(messages, tools=None, max_history_messages=10):
     prompt_parts = []
     
-    # Dynamic tools injection if tools provided by Hermes
     custom_tools_desc = ""
     if tools and isinstance(tools, list):
         filtered_tools = []
         for t in tools:
             fn = t.get("function", {})
             t_name = fn.get("name", "")
-            # Skip heavy cloud tools if any, keep local and useful tools
             if any(bad in t_name.lower() for bad in ("feishu", "wechat", "lark", "dingtalk")):
                 continue
             filtered_tools.append({
@@ -147,7 +170,6 @@ def build_cached_prompt(messages, tools=None, max_history_messages=10):
             
     recent_chat = non_sys[-max_history_messages:] if len(non_sys) > max_history_messages else non_sys
     
-    # Directive injection if user addresses Antigravity
     last_user_msg = ""
     for m in reversed(recent_chat):
         if m.get("role") == "user":
@@ -157,10 +179,10 @@ def build_cached_prompt(messages, tools=None, max_history_messages=10):
     if re.search(r"\bantigravity\b", last_user_msg, re.I):
         prompt_parts.append("""[SYSTEM DIRECTIVE - MANDATORY TOOL CALL]:
 Utilizatorul i se adresează lui Antigravity (sau cere să-i transmiți ceva / să verifice ceva).
-ESTE STRICT INTERZIS să inventezi dialoguri, să citezi din burtă sau să pretinzi că i-ai transmis tu fără să apelezi unealta!
+ESTE STRICT INTERZIS să inventezi dialoguri!
 TREBUIE să generezi IMEDIAT apelul de unealtă terminal:
-<tool_call>{"name":"terminal","arguments":{"command":"python3 /opt/data/laptop_bridge.py run \"<mesaj_utilizator>\""}}</tool_call>
-După ce primești rezultatul uneltei, abia atunci îi răspunzi lui Florin cu răspunsul real primit.""")
+<tool_call>{"name":"terminal","arguments":{"command":"python3 /opt/data/laptop_bridge.py run --async \"<mesaj_utilizator>\""}}</tool_call>
+După ce primești confirmarea lansării, îi răspunzi scurt lui Florin că sarcina a fost lansată pe laptop.""")
     
     for m in recent_chat:
         role = m.get("role", "user")
@@ -192,12 +214,11 @@ După ce primești rezultatul uneltei, abia atunci îi răspunzi lui Florin cu r
     return "\n\n".join(prompt_parts)
 
 def select_model(prompt: str, client_requested_model: str = "") -> tuple[str, str]:
-    """Strictly lock to Gemini 3.8 Flash (Low) for sub-3s latency. No auto-switch to Pro."""
     return DEFAULT_MODEL, "3m"
 
 def extract_tool_calls(text: str) -> tuple[list, str]:
-    """Extracts tool calls and returns (tool_calls, cleaned_text_without_xml)."""
     tool_calls = []
+    seen = set()
     matches = list(re.finditer(r"<tool_call>\s*(.*?)\s*</tool_call>", text, re.DOTALL))
     for i, m in enumerate(matches):
         raw_json = m.group(1).strip()
@@ -206,6 +227,10 @@ def extract_tool_calls(text: str) -> tuple[list, str]:
             name = call_obj.get("name", "")
             args = call_obj.get("arguments", {})
             args_str = args if isinstance(args, str) else json.dumps(args)
+            key = (name, args_str)
+            if key in seen:
+                continue
+            seen.add(key)
             tool_calls.append({
                 "id": f"call_{int(time.time())}_{i}",
                 "type": "function",
@@ -217,12 +242,10 @@ def extract_tool_calls(text: str) -> tuple[list, str]:
         except Exception:
             pass
             
-    # Clean tool calls from the user-facing content to prevent session corruption
     cleaned_text = re.sub(r"<tool_call>\s*.*?\s*</tool_call>", "", text, flags=re.DOTALL).strip()
     return tool_calls, cleaned_text
 
 def extract_reasoning(text: str) -> tuple[str, str]:
-    """Separates <think>...</think> from main content."""
     reasoning = ""
     m = re.search(r"<think>\s*(.*?)\s*</think>", text, re.DOTALL)
     if m:
@@ -231,7 +254,6 @@ def extract_reasoning(text: str) -> tuple[str, str]:
     return reasoning, text
 
 async def run_agy_prompt(prompt: str, model_name: str, timeout_str: str = "3m") -> tuple[str, bool]:
-    """Runs the AGY CLI with stream-json, extracts the completed response instantly and terminates the process immediately."""
     cmd = [
         AGY_BIN,
         "--model", model_name,
@@ -254,7 +276,7 @@ async def run_agy_prompt(prompt: str, model_name: str, timeout_str: str = "3m") 
         
         full_response = ""
         success = False
-        loop_timeout = 75.0
+        loop_timeout = 120.0
         start_wait = time.time()
         
         while time.time() - start_wait < loop_timeout:
@@ -281,18 +303,12 @@ async def run_agy_prompt(prompt: str, model_name: str, timeout_str: str = "3m") 
                     if status == "SUCCESS":
                         full_response = res.get("response", "").strip()
                         success = bool(full_response)
-                    else:
-                        err_msg = res.get("error", f"Status: {status}")
-                        with open("/tmp/proxy_debug.log", "a") as f:
-                            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] AGY RESULT ERROR (Model {model_name}): {err_msg}\n")
                     break
             except Exception:
                 pass
                 
         return full_response, success
-    except Exception as e:
-        with open("/tmp/proxy_debug.log", "a") as f:
-            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] RUN_AGY EXCEPTION (Model {model_name}): {str(e)}\n")
+    except Exception:
         return "", False
     finally:
         if process:
@@ -312,7 +328,7 @@ async def chat_completions(request: Request):
     stream = data.get("stream", False)
     client_model = data.get("model", "")
 
-    # --- AUTO-ROUTER FOR LAPTOP / ANTIGRAVITY / GIT DIFF ---
+    # --- FAST AUTO-ROUTER (INTERCEPT QUICK COMMANDS & LAPTOP STEERING) ---
     last_user_msg = ""
     for m in reversed(messages):
         if m.get("role") == "user":
@@ -323,48 +339,82 @@ async def chat_completions(request: Request):
     
     routed_reply = None
     if not is_tool_followup and last_user_msg:
-        # Case A: Git Diff / Patch from Telegram
-        if "diff --git " in last_user_msg or ("--- a/" in last_user_msg and "+++ b/" in last_user_msg):
+        clean_prompt = last_user_msg.strip()
+        
+        # Case 0: /cancel /stop /opreste-te
+        if re.search(r"^\s*/(cancel|stop)\b|\b(opreste(-te)?|anuleaza)\s+(tot|task|totul|laptop)\b", clean_prompt, re.I):
+            print(f"[ROUTER] Cancel requested. Stopping background jobs...")
+            try:
+                proc = await asyncio.to_thread(
+                    subprocess.run,
+                    ["python3", "/opt/stacks/hermes/data/laptop_bridge.py", "cancel"],
+                    capture_output=True, text=True, timeout=15
+                )
+                routed_reply = f"🛑 {proc.stdout.strip() or 'Am anulat sarcinile active de pe laptop!'}"
+            except Exception as e:
+                routed_reply = f"❌ Eroare la cancel: {e}"
+
+        # Case 1: Side-channel / steering note (/btw <nota>, /nota <nota>)
+        elif re.match(r"^\s*/(btw|nota|side)\b", clean_prompt, re.I):
+            note = re.sub(r"^\s*/(btw|nota|side)\s*", "", clean_prompt, flags=re.I).strip()
+            print(f"[ROUTER] Adding /btw note: {note[:60]}...")
+            try:
+                proc = await asyncio.to_thread(
+                    subprocess.run,
+                    ["python3", "/opt/stacks/hermes/data/laptop_bridge.py", "btw", note],
+                    capture_output=True, text=True, timeout=15
+                )
+                routed_reply = f"⚡ [BTW / Nota Inregistrata]: Am injectat-o direct in contextul activ de pe laptop:\n> *{note}*"
+            except Exception as e:
+                routed_reply = f"❌ Eroare la trimitere /btw: {e}"
+
+        # Case 2: Git Diff / Patch from Telegram
+        elif "diff --git " in clean_prompt or ("--- a/" in clean_prompt and "+++ b/" in clean_prompt):
             print(f"[ROUTER] Detected incoming git diff. Dispatching to laptop_bridge patch...")
             try:
                 proc = await asyncio.to_thread(
                     subprocess.run,
-                    ["python3", "/opt/stacks/hermes/data/laptop_bridge.py", "patch", last_user_msg],
+                    ["python3", "/opt/stacks/hermes/data/laptop_bridge.py", "patch", clean_prompt],
                     capture_output=True, text=True, timeout=120
                 )
                 routed_reply = proc.stdout.strip() or proc.stderr.strip()
             except Exception as e:
                 routed_reply = f"❌ Eroare la aplicare patch pe laptop: {e}"
                 
-        # Case B: Laptop Status Check
-        elif re.search(r"\b(status\s+laptop|laptop\s+status)\b", last_user_msg, re.I):
+        # Case 3: Laptop Status Check (/status or questions about laptop status)
+        elif re.search(r"^\s*/status\b|\b(status\s+laptop|laptop\s+status|ce\s+face\s+laptop)\b", clean_prompt, re.I):
             print(f"[ROUTER] Checking laptop status...")
             try:
                 proc = await asyncio.to_thread(
                     subprocess.run,
                     ["python3", "/opt/stacks/hermes/data/laptop_bridge.py", "status"],
-                    capture_output=True, text=True, timeout=30
+                    capture_output=True, text=True, timeout=20
                 )
                 routed_reply = proc.stdout.strip() or proc.stderr.strip()
             except Exception as e:
                 routed_reply = f"❌ Eroare la status laptop: {e}"
                 
-        # Case C: Antigravity Direct Addressing / Question
-        elif re.search(r"\b(antigravity|anti-gravity|antigrav|pe\s+laptop)\b", last_user_msg, re.I):
-            print(f"[ROUTER] Routing prompt to Antigravity on laptop: {last_user_msg[:60]}...")
+        # Case 4: Antigravity Direct Addressing / Question / Task
+        elif re.search(r"\b(antigravity|anti-gravity|antigrav|pe\s+laptop)\b", clean_prompt, re.I):
+            print(f"[ROUTER] Routing prompt to Antigravity on laptop: {clean_prompt[:60]}...")
+            is_heavy = bool(re.search(r"\b(fa|repara|fix|construieste|implementeaza|modifica|compileaza|scrie|creeaza|ruleaza|start)\b", clean_prompt, re.I))
+            cmd_args = ["python3", "/opt/stacks/hermes/data/laptop_bridge.py", "run"]
+            if is_heavy:
+                cmd_args.append("--async")
+            cmd_args.append(clean_prompt)
             try:
                 proc = await asyncio.to_thread(
                     subprocess.run,
-                    ["python3", "/opt/stacks/hermes/data/laptop_bridge.py", "run", last_user_msg],
-                    capture_output=True, text=True, timeout=180
+                    cmd_args,
+                    capture_output=True, text=True, timeout=60
                 )
                 out = proc.stdout.strip()
                 if out:
-                    routed_reply = f"⚡ Răspuns direct de la Antigravity (Laptop):\n\n{out}"
+                    routed_reply = f"⚡ Raspuns de la Laptop Bridge:\n\n{out}"
                 else:
-                    routed_reply = f"⚠️ Antigravity nu a întors text:\n{proc.stderr.strip()}"
+                    routed_reply = f"⚠️ Laptop Bridge nu a intors text:\n{proc.stderr.strip()}"
             except Exception as e:
-                routed_reply = f"❌ Eroare la comunicare cu Antigravity pe laptop: {e}"
+                routed_reply = f"❌ Eroare la comunicare cu laptop: {e}"
 
     if routed_reply:
         chunk_id = f"chatcmpl-{int(time.time())}"
@@ -376,7 +426,7 @@ async def chat_completions(request: Request):
                 yield "data: [DONE]\n\n"
             return StreamingResponse(fast_stream(), media_type="text/event-stream")
         else:
-            return {
+            return JSONResponse({
                 "id": chunk_id,
                 "object": "chat.completion",
                 "created": int(time.time()),
@@ -388,7 +438,7 @@ async def chat_completions(request: Request):
                         "finish_reason": "stop"
                     }
                 ]
-            }
+            })
     
     prompt = build_cached_prompt(messages, tools=tools)
     chosen_model, initial_timeout = select_model(prompt, client_requested_model=client_model)
@@ -399,8 +449,6 @@ async def chat_completions(request: Request):
             task = asyncio.create_task(run_agy_prompt(prompt, chosen_model, timeout_str=initial_timeout))
             
             try:
-                # Keep-alive loop: while the model is thinking / working,
-                # send SSE comment pings every 2 seconds
                 while not task.done():
                     await asyncio.sleep(2)
                     if not task.done():
@@ -409,7 +457,6 @@ async def chat_completions(request: Request):
                 full_text, success = await task
                 effective_model = chosen_model
                 
-                # Fallback to Flash if Pro failed or returned empty
                 if (not success or not full_text.strip()) and chosen_model != DEFAULT_MODEL:
                     print(f"[FALLBACK] Model {chosen_model} failed. Retrying with {DEFAULT_MODEL}...")
                     fallback_task = asyncio.create_task(run_agy_prompt(prompt, DEFAULT_MODEL, timeout_str="3m"))
@@ -425,7 +472,7 @@ async def chat_completions(request: Request):
                             fallback_task.cancel()
                     
                 if not full_text.strip():
-                    full_text = "Boss, am avut un scurt sughiț pe conexiune, dar am resetat țeava. Mai dă o dată comanda sau un ping scurt!"
+                    full_text = "Boss, m-am sincopat o secunda pe conexiune, dar sunt in picioare. Reincearca comanda sau da-i un ping scurt!"
                     
                 tool_calls, clean_text = extract_tool_calls(full_text)
                 reasoning, clean_text = extract_reasoning(clean_text)
@@ -433,15 +480,12 @@ async def chat_completions(request: Request):
                 t_elapsed = round(time.time() - t_start, 2)
                 print(f"[COMPLETION-STREAM] Model: {effective_model} | Time: {t_elapsed}s | Tool Calls: {len(tool_calls)} | Text len: {len(clean_text)}")
                 
-                # If reasoning exists, we yield it
                 if reasoning:
                     yield f"data: {json.dumps({'id': chunk_id, 'object': 'chat.completion.chunk', 'choices': [{'index': 0, 'delta': {'role': 'assistant', 'content': f'<think>{reasoning}</think>\n'}}]})}\n\n"
                     
-                # Yield user-facing cleaned text
                 if clean_text:
                     yield f"data: {json.dumps({'id': chunk_id, 'object': 'chat.completion.chunk', 'choices': [{'index': 0, 'delta': {'role': 'assistant', 'content': clean_text}}]})}\n\n"
                     
-                # Yield tool calls if any
                 if tool_calls:
                     for tc in tool_calls:
                         yield f"data: {json.dumps({'id': chunk_id, 'object': 'chat.completion.chunk', 'choices': [{'index': 0, 'delta': {'role': 'assistant', 'tool_calls': [tc]}}]})}\n\n"
@@ -457,7 +501,6 @@ async def chat_completions(request: Request):
         return StreamingResponse(event_generator(), media_type="text/event-stream")
         
     else:
-        # Non-streaming request
         full_text, success = await run_agy_prompt(prompt, chosen_model, timeout_str=initial_timeout)
         effective_model = chosen_model
         
@@ -467,7 +510,7 @@ async def chat_completions(request: Request):
             effective_model = f"{chosen_model}->FALLBACK({DEFAULT_MODEL})"
             
         if not full_text.strip():
-            full_text = "Boss, m-am sincopat o secundă pe conexiune, dar sunt în picioare. Reîncearcă comanda sau dă-i un ping scurt!"
+            full_text = "Boss, m-am sincopat o secunda pe conexiune, dar sunt in picioare. Reincearca comanda sau da-i un ping scurt!"
             
         tool_calls, clean_text = extract_tool_calls(full_text)
         reasoning, clean_text = extract_reasoning(clean_text)
