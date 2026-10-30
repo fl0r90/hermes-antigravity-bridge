@@ -91,6 +91,13 @@ ALLOWED_TOOL_NAMES = {
     "delegate_task"
 }
 
+SUBAGENT_SYSTEM_PREFIX = os.environ.get("SUBAGENT_SYSTEM_PREFIX", """You are a focused, autonomous subagent executing a delegated task inside the container.
+Execute the available tools directly and systematically to achieve your goal.
+Do not output meta-commentary, conversational filler, disclaimers, or placeholder tags.
+Emit real tool calls in the exact format:
+<tool_call>{"name":"tool_name","arguments":{"key":"value"}}</tool_call>
+When the task is complete, provide your final summary and conclusion directly in plain text without any tool calls.""")
+
 STATIC_PREFIX = os.environ.get("STATIC_SYSTEM_PREFIX", """You are Hermes Agent, a sharp, witty Romanian SysAdmin & DevOps assistant.
 Parlează românește direct, amuzant și fără limbaj corporatrist. Ești genial pe tehnică (Docker, Linux, Proxmox, Media Stack).
 
@@ -123,7 +130,7 @@ ROL & COLABORARE STRICTĂ CU ANTIGRAVITY (LAPTOP DEV):
 - REGULĂ CAPITALĂ PENTRU COMUNICAREA CU ANTIGRAVITY:
   Dacă Florin îți spune „spune-i lui Antigravity...”, „transmite-i lui Antigravity...”, „întreabă-l pe Antigravity...”, „ce zice Antigravity”, sau orice mesaj adresat lui Antigravity ori legat de cod DocAI:
   EȘTI OBLIGAT SĂ EXECUȚI IMEDIAT:
-  <tool_call>{"name":"terminal","arguments":{"command":"python3 /opt/data/laptop_bridge.py run --async "<mesajul lui Florin>""}}</tool_call>
+  <tool_call>{"name":"terminal","arguments":{"command":"python3 /opt/data/laptop_bridge.py run --async \"<mesajul lui Florin>\""}}</tool_call>
   Sub nicio formă NU răspunde tu în locul lui Antigravity și NU minți că i-ai transmis mesajul dacă nu ai rulat comanda de mai sus!
 - ALTE COMENZI RAPIDE (prin terminal):
   * Status Proxmox nod & resurse / VM-uri: python3 /opt/data/proxmox_helper.py
@@ -138,8 +145,16 @@ When analyzing, you can include your thinking in <think>...</think> tags at the 
 To call a tool: <tool_call>{"name":"tool_name","arguments":{"key":"val"}}</tool_call>
 Else reply directly.""")
 
-def build_cached_prompt(messages, tools=None, max_history_messages=10):
+def build_cached_prompt(messages, tools=None, max_history_messages=40):
     prompt_parts = []
+    
+    sys_msgs = [m for m in messages if m.get("role") == "system"]
+    non_sys = [m for m in messages if m.get("role") != "system"]
+
+    is_subagent = any(
+        "subagent" in (m.get("content") or "").lower() or "delegated task" in (m.get("content") or "").lower()
+        for m in sys_msgs
+    )
     
     custom_tools_desc = ""
     if tools and isinstance(tools, list):
@@ -157,18 +172,22 @@ def build_cached_prompt(messages, tools=None, max_history_messages=10):
         if filtered_tools:
             custom_tools_desc = f"\nActive Tools available: {json.dumps(filtered_tools)}"
 
-    base_prefix = STATIC_PREFIX + custom_tools_desc
+    if is_subagent:
+        base_prefix = SUBAGENT_SYSTEM_PREFIX + custom_tools_desc
+    else:
+        base_prefix = STATIC_PREFIX + custom_tools_desc
     prompt_parts.append(base_prefix)
-
-    sys_msgs = [m for m in messages if m.get("role") == "system"]
-    non_sys = [m for m in messages if m.get("role") != "system"]
     
     for sm in sys_msgs:
         s_content = sm.get("content", "").strip()
-        if s_content and s_content not in STATIC_PREFIX:
+        if s_content and s_content not in STATIC_PREFIX and s_content not in SUBAGENT_SYSTEM_PREFIX:
             prompt_parts.append(f"[system]:\n{s_content}")
             
-    recent_chat = non_sys[-max_history_messages:] if len(non_sys) > max_history_messages else non_sys
+    if len(non_sys) > max_history_messages:
+        # Preserve root user task goal (first non-system message) + recent tail
+        recent_chat = [non_sys[0]] + non_sys[-(max_history_messages - 1):]
+    else:
+        recent_chat = non_sys
     
     last_user_msg = ""
     for m in reversed(recent_chat):
@@ -176,7 +195,7 @@ def build_cached_prompt(messages, tools=None, max_history_messages=10):
             last_user_msg = m.get("content", "") or ""
             break
             
-    if re.search(r"\bantigravity\b", last_user_msg, re.I):
+    if not is_subagent and re.search(r"\bantigravity\b", re.sub(r"antigravity-vibe-engine", "", last_user_msg, flags=re.I), re.I):
         prompt_parts.append("""[SYSTEM DIRECTIVE - MANDATORY TOOL CALL]:
 Utilizatorul i se adresează lui Antigravity (sau cere să-i transmiți ceva / să verifice ceva).
 ESTE STRICT INTERZIS să inventezi dialoguri!
@@ -341,8 +360,22 @@ async def chat_completions(request: Request):
     if not is_tool_followup and last_user_msg:
         clean_prompt = last_user_msg.strip()
         
+        # Check if message is an internal Hermes gateway/system event or delegation result
+        is_internal_system_event = any(marker in clean_prompt for marker in [
+            "[ASYNC DELEGATION",
+            "[INTERNAL NOTIFICATION",
+            "A background fan-out unit you dispatched earlier",
+            "delegate_task",
+            "delegation_id",
+            "sa-0-"
+        ])
+        
+        if is_internal_system_event:
+            # Let internal system notifications pass through to LLM reasoning!
+            routed_reply = None
+
         # Case 0: /cancel /stop /opreste-te
-        if re.search(r"^\s*/(cancel|stop)\b|\b(opreste(-te)?|anuleaza)\s+(tot|task|totul|laptop)\b", clean_prompt, re.I):
+        elif re.search(r"^\s*/(cancel|stop)\b|\b(opreste(-te)?|anuleaza)\s+(tot|task|totul|laptop)\b", clean_prompt, re.I):
             print(f"[ROUTER] Cancel requested. Stopping background jobs...")
             try:
                 proc = await asyncio.to_thread(
@@ -394,8 +427,8 @@ async def chat_completions(request: Request):
             except Exception as e:
                 routed_reply = f"❌ Eroare la status laptop: {e}"
                 
-        # Case 4: Antigravity Direct Addressing / Question / Task
-        elif re.search(r"\b(antigravity|anti-gravity|antigrav|pe\s+laptop)\b", clean_prompt, re.I):
+        # Case 4: Antigravity Direct Addressing / Question / Task (strip model name to avoid false trigger)
+        elif re.search(r"\b(antigravity|anti-gravity|antigrav|pe\s+laptop)\b", re.sub(r"antigravity-vibe-engine", "", clean_prompt, flags=re.I), re.I):
             print(f"[ROUTER] Routing prompt to Antigravity on laptop: {clean_prompt[:60]}...")
             is_heavy = bool(re.search(r"\b(fa|repara|fix|construieste|implementeaza|modifica|compileaza|scrie|creeaza|ruleaza|start)\b", clean_prompt, re.I))
             cmd_args = ["python3", "/opt/stacks/hermes/data/laptop_bridge.py", "run"]
@@ -413,6 +446,8 @@ async def chat_completions(request: Request):
                     routed_reply = f"⚡ Raspuns de la Laptop Bridge:\n\n{out}"
                 else:
                     routed_reply = f"⚠️ Laptop Bridge nu a intors text:\n{proc.stderr.strip()}"
+            except Exception as e:
+                routed_reply = f"❌ Eroare la comunicare cu laptop: {e}"
             except Exception as e:
                 routed_reply = f"❌ Eroare la comunicare cu laptop: {e}"
 
