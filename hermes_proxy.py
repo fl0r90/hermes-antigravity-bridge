@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import time
 import sys
@@ -6,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+import glob
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 import uvicorn
@@ -72,6 +74,67 @@ async def version():
 async def mock_ok():
     return {"status": "ok", "version": "2.5.0", "context_length": 256000}
 
+
+async def generate_image_local(prompt: str) -> dict:
+    t_start = time.time()
+    out_dir = "/opt/stacks/hermes/data/generated_images"
+    os.makedirs(out_dir, exist_ok=True)
+
+    cmd = [
+        AGY_BIN,
+        "--dangerously-skip-permissions",
+        "-p",
+        f"Foloseste subagentul image-generator pentru a genera o imagine pentru: {prompt}. Asigura-te ca imaginea este salvata pe disc."
+    ]
+
+    print(f"[IMAGEN-LOCAL] Starting generation for: {prompt}...")
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
+    stdout, stderr = await proc.communicate()
+
+    candidates = []
+    for ext in ("*.jpg", "*.jpeg", "*.png"):
+        candidates.extend(glob.glob(f"/root/.gemini/antigravity-cli/brain/**/{ext}", recursive=True))
+
+    new_files = [f for f in candidates if os.path.getmtime(f) >= t_start - 5]
+    if new_files:
+        latest = max(new_files, key=os.path.getmtime)
+        filename = f"hermes_{int(time.time())}{os.path.splitext(latest)[1]}"
+        dest = os.path.join(out_dir, filename)
+        shutil.copyfile(latest, dest)
+        os.chmod(dest, 0o777)
+        container_path = f"/opt/data/generated_images/{filename}"
+        print(f"[IMAGEN-LOCAL] SUCCESS in {round(time.time() - t_start, 2)}s! Saved to: {dest}")
+        return {
+            "status": "success",
+            "container_path": container_path,
+            "media_tag": f"MEDIA:{container_path}",
+            "image": container_path,
+            "data": [{"url": f"file://{container_path}"}]
+        }
+    else:
+        err_msg = stdout.decode() if stdout else "No image output found"
+        print(f"[IMAGEN-LOCAL] Failed to generate image: {err_msg[:200]}")
+        return {"status": "error", "message": err_msg}
+
+@app.post("/api/antigravity/generate-image")
+@app.post("/v1/images/generations")
+async def generate_image_antigravity(request: Request):
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    prompt = (data.get("prompt") or "").strip()
+    if not prompt:
+        return JSONResponse({"status": "error", "message": "No prompt provided"}, status_code=400)
+    res = await generate_image_local(prompt)
+    if res.get("status") == "success":
+        return JSONResponse(res)
+    return JSONResponse(res, status_code=500)
+
 @app.get("/api/laptop/register")
 @app.post("/api/laptop/register")
 async def register_laptop_ip(ip: str = None, request: Request = None):
@@ -114,6 +177,8 @@ When you have completed the task and gathered all evidence, provide your final s
 
 STATIC_PREFIX = os.environ.get("STATIC_SYSTEM_PREFIX", """You are Hermes Agent, a sharp, witty Romanian SysAdmin & DevOps assistant (băiat de cartier tehnic, vorbind direct cu 'boss', amuzant, dar 100% riguros pe dovezi tehnice).
 Parlează românește direct, natural și fără limbaj corporatrist.
+
+IMAGE GENERATION: When the user asks you to generate, draw, paint or send an image/photo (e.g. 'deseneaza', 'fa-mi o poza cu', 'creeaza o imagine'), use the image_generate tool or run python3 /opt/data/antigravity_image_gen.py '<prompt>'. The generated image will be automatically delivered as a native photo on Telegram!
 
 CRITICAL RUNTIME DIRECTIVE (MANDATORY):
 You are the main conversational interface on Telegram. Your #1 priority is to NEVER block the Telegram conversation!
@@ -600,11 +665,130 @@ def extract_async_delegation_fallback(text: str) -> str:
     return "Subagentul din fundal a terminat execuția. Dă-mi un semn dacă vrei detalii suplimentare!"
 
 
+def extract_images_from_messages(messages: list) -> list[str]:
+    """Extracts local image paths or decodes base64 images to /tmp/ for multimodal handling."""
+    image_paths = []
+    for m in messages:
+        c = m.get("content")
+        if isinstance(c, list):
+            for part in c:
+                if isinstance(part, dict):
+                    t = part.get("type", "")
+                    if t in ("image_url", "image", "input_image"):
+                        url_obj = part.get("image_url", {})
+                        url = url_obj.get("url", "") if isinstance(url_obj, dict) else str(url_obj)
+                        if url.startswith("data:image"):
+                            try:
+                                header, data = url.split(",", 1)
+                                b_data = base64.b64decode(data)
+                                ext = "png" if "png" in header else "jpg"
+                                tmp_p = f"/tmp/hermes_vision_{int(time.time()*1000)}.{ext}"
+                                with open(tmp_p, "wb") as f:
+                                    f.write(b_data)
+                                image_paths.append(tmp_p)
+                            except Exception as e:
+                                print(f"[BASE64-DECODE-ERR] {e}")
+                        elif url.startswith("/opt/data/"):
+                            host_p = url.replace("/opt/data/", "/opt/stacks/hermes/data/")
+                            if os.path.exists(host_p):
+                                image_paths.append(host_p)
+                        elif url.startswith("/root/.hermes/"):
+                            host_p = url.replace("/root/.hermes/", "/opt/stacks/hermes/data/")
+                            if os.path.exists(host_p):
+                                image_paths.append(host_p)
+                        elif os.path.exists(url):
+                            image_paths.append(url)
+    return image_paths
+
+
+def extract_vision_prompt_text(messages: list) -> str:
+    parts = []
+    for m in messages:
+        c = m.get("content")
+        if isinstance(c, list):
+            for part in c:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    t = str(part.get("text", "")).strip()
+                    if t:
+                        parts.append(t)
+        elif isinstance(c, str):
+            s = c.strip()
+            if s:
+                parts.append(s)
+    return "\n".join(parts).strip()
+
+
+async def analyze_image_with_agy(image_path: str, user_prompt: str) -> str:
+    user_prompt = (user_prompt or "").strip()
+    if not user_prompt:
+        user_prompt = "Descrie detaliat conținutul imaginii, inclusiv textul vizibil, componentele grafice, erorile sau elementele cheie."
+    prompt = f"Analizează detaliat imaginea folosind unealta nativă read_file pe calea '{image_path}'. {user_prompt}"
+    cmd = [
+        AGY_BIN,
+        "--dangerously-skip-permissions",
+        "--model=Gemini 3.8 Flash (Low)",
+        "--print-timeout=60s",
+        "-p",
+        prompt
+    ]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await proc.communicate()
+        out = stdout.decode("utf-8", errors="replace").strip()
+        if not out:
+            err = stderr.decode("utf-8", errors="replace").strip()
+            print(f"[AGY-VISION-ERR] {err}")
+            return f"Nu am putut analiza imaginea: {err}"
+        return out
+    except Exception as e:
+        print(f"[AGY-VISION-EXC] {e}")
+        return f"Eroare la procesarea imaginii: {e}"
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
     t_start = time.time()
     data = await request.json()
     messages = data.get("messages", []) or []
+
+    # --- NATIVE MULTIMODAL / VISION INTERCEPTOR ---
+    raw_images = extract_images_from_messages(messages)
+    if raw_images:
+        img_p = raw_images[0]
+        v_prompt = extract_vision_prompt_text(messages)
+        print(f"[VISION-ROUTER] Routing image {img_p} to Antigravity read_file...")
+        analysis_res = await analyze_image_with_agy(img_p, v_prompt)
+        if img_p.startswith("/tmp/hermes_vision_"):
+            try:
+                os.remove(img_p)
+            except Exception:
+                pass
+        chunk_id = f"chatcmpl-vision-{int(time.time()*1000)}"
+        stream = data.get("stream", False)
+        print(f"[VISION-ROUTER] Finished vision analysis ({len(analysis_res)} chars) in {round(time.time()-t_start, 2)}s.")
+        if stream:
+            async def vision_stream():
+                yield f"data: {json.dumps({'id': chunk_id, 'object': 'chat.completion.chunk', 'choices': [{'index': 0, 'delta': {'role': 'assistant', 'content': analysis_res}}]})}\n\n"
+                yield f"data: {json.dumps({'id': chunk_id, 'object': 'chat.completion.chunk', 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
+                yield "data: [DONE]\n\n"
+            return StreamingResponse(vision_stream(), media_type="text/event-stream")
+        else:
+            return JSONResponse({
+                "id": chunk_id,
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": "antigravity-vibe-engine",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": analysis_res},
+                    "finish_reason": "stop"
+                }]
+            })
+
     # Normalize multimodal/list content to text once, so every downstream .strip()/regex is safe
     for m in messages:
         if isinstance(m, dict) and not isinstance(m.get("content"), str):
@@ -655,6 +839,9 @@ async def chat_completions(request: Request):
         # Strip Hermes gateway origin metadata header if present
         if "Do not guess a reply destination when these fields are insufficient." in clean_prompt:
             clean_prompt = clean_prompt.split("Do not guess a reply destination when these fields are insufficient.", 1)[-1].strip()
+
+        # Also strip [System: ...] notices injected by Hermes
+        clean_prompt = re.sub(r"\[System:.*?\]", "", clean_prompt, flags=re.DOTALL).strip()
 
         # Case 0: /cancel /stop /opreste-te
         if re.search(r"^\s*/(cancel|stop)\b|\b(opreste(-te)?|anuleaza)\s+(tot|task|totul|laptop)\b", clean_prompt, re.I):
@@ -709,8 +896,17 @@ async def chat_completions(request: Request):
             except Exception as e:
                 routed_reply = f"❌ Eroare la status laptop: {e}"
 
+        # Case 3.5: Image Generation Request
+        elif re.search(r"\b(genereaz[aă]|creeaz[aă]|f[aă](-mi)?|deseneaz[aă]|scoate(-mi)?)\s+(o\s+)?(poz[aă]|imagine|desen|foto|artwork|caricatur[aă])\b|\b(generate|draw|create)\s+(an?\s+)?(image|photo|picture)\b", clean_prompt, re.I):
+            print(f"[ROUTER] Intercepted image generation prompt: {clean_prompt[:60]}...")
+            res = await generate_image_local(clean_prompt)
+            if res.get("status") == "success":
+                routed_reply = f"Gata imaginea, boss! Ia privește acilea: 🎨✨\n\n{res['media_tag']}"
+            else:
+                routed_reply = f"⚠️ Nu am putut genera imaginea, a apărut o eroare:\n{res.get('message', 'Eroare necunoscuta')}"
+
         # Case 4: Antigravity Direct Addressing / Question / Task
-        elif re.search(r"\b(antigravity|anti-gravity|antigrav|pe\s+laptop)\b", re.sub(r"antigravity-vibe-engine", "", clean_prompt, flags=re.I), re.I):
+        elif re.search(r"\b(antigravity|anti-gravity|antigrav|pe\s+laptop)\b", re.sub(r"antigravity-(vibe-engine|imagen)", "", clean_prompt, flags=re.I), re.I):
             print(f"[ROUTER] Routing prompt to Antigravity on laptop: {clean_prompt[:60]}...")
             is_heavy = bool(re.search(r"\b(fa|repara|fix|construieste|implementeaza|modifica|compileaza|scrie|creeaza|ruleaza|start)\b", clean_prompt, re.I))
             cmd_args = ["python3", "/opt/stacks/hermes/data/laptop_bridge.py", "run"]
