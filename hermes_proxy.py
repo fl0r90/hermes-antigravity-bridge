@@ -17,7 +17,7 @@ app = FastAPI(title="Hermes Antigravity Bridge Proxy", version="2.5.0")
 AGY_BIN = os.environ.get("AGY_BIN", shutil.which("agy") or "/usr/local/bin/agy")
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8080"))
-DEFAULT_MODEL = os.environ.get("DEFAULT_MODEL", "Gemini 3.8 Flash (Low)")
+DEFAULT_MODEL = os.environ.get("DEFAULT_MODEL", "Gemini 3.8 Flash (Medium)")
 PRO_MODEL = os.environ.get("PRO_MODEL", "Gemini 4 Argon (Medium)")
 BRAIN_DIR = "/root/.gemini/antigravity-cli/brain"
 
@@ -164,6 +164,16 @@ INFRASTRUCTURE CHEAT-SHEET (CRITICAL):
    - You have direct access to the Docker socket inside this container (docker ps, docker logs, docker inspect) or via ssh -o BatchMode=yes root@192.168.0.196 "<command>".
    - Stack configs are on 192.168.0.196 in /opt/stacks/.
 3. Jellyseerr helper: python3 /opt/data/jellyseerr_helper.py
+4. Home Assistant OS (VM 103 on Proxmox 192.168.0.18, UI http://192.168.0.115:8123):
+   - Access via: ssh -o BatchMode=yes root@192.168.0.18 "qm guest exec 103 -- sh -c \"<cmd>\""
+   - CRITICAL: python3 is NOT on the HAOS host; run Python inside the HA container via: docker exec -i homeassistant python3 -
+   - Config path: /mnt/data/supervisor/homeassistant/ on host (/config inside container). API token "Hermes" is in /config/.storage/auth.
+5. VPS Cloud (100.84.137.23): ssh -o BatchMode=yes -i /opt/data/vps_key root@100.84.137.23 "<cmd>" (or python3 /opt/data/vps_helper.py).
+
+EVIDENCE-ONLY MANDATE (STRICT):
+- NEVER fabricate or guess entity IDs, command outputs, HTTP status codes, or root causes.
+- Only report facts, states, and outputs directly observed in tool stdout/stderr.
+- If you did NOT execute a requested change yet, explicitly state "NU a fost aplicat" — NEVER claim a task is done without verified post-change output.
 
 TOOL CALL FORMAT:
 To execute a tool, emit ONLY standard text tags in this exact format (outside of <think> tags):
@@ -353,14 +363,14 @@ def build_cached_prompt(messages, tools=None, max_history_messages=36):
 
     if is_subagent:
         base_prefix = SUBAGENT_SYSTEM_PREFIX + custom_tools_desc
-        # Subagent turn limit warnings:
-        num_turns = len(non_sys)
-        if num_turns >= 20:
+        # Subagent turn limit warnings (count actual assistant turns, not raw message count):
+        num_turns = sum(1 for m in non_sys if isinstance(m, dict) and m.get("role") == "assistant")
+        if num_turns >= 22:
             prompt_parts.append("""[SYSTEM DIRECTIVE - HARD WRAP-UP]:
-Ai executat deja multiple iterații pentru această sarcină. Dacă ai obținut datele necesare sau dacă sunt erori, NU mai apela alte unelte! Formulează direct raportul final complet și sintetizat pentru a încheia execuția.""")
-        if num_turns >= 30:
+Ai executat deja peste 22 de pași pentru această sarcină. Dacă ai obținut datele necesare sau dacă modificarea este verificată, NU mai apela alte unelte! Formulează direct raportul final complet și sintetizat pentru a încheia execuția.""")
+        if num_turns >= 28:
             prompt_parts.append("""[SYSTEM DIRECTIVE - STRICT STOP]:
-LIMITĂ MAXIMĂ DE ITERAȚII ATINSĂ. NU MAI APELA NICIO UNEALTĂ (<tool_call> ESTE STRICT INTERZIS). Sintetizează IMEDIAT raportul final cu tot ce ai investigat sau descoperit până acum!""")
+LIMITĂ MAXIMĂ DE ITERAȚII ATINSĂ (28 pași). NU MAI APELA NICIO UNEALTĂ (<tool_call> ESTE STRICT INTERZIS). Sintetizează IMEDIAT raportul final cu tot ce ai investigat sau executat până acum!""")
     else:
         base_prefix = STATIC_PREFIX + custom_tools_desc
     prompt_parts.append(base_prefix)
@@ -435,7 +445,9 @@ NU apela nicio unealtă suplimentară dacă sarcina s-a finalizat cu succes (sta
     return "\n\n".join(prompt_parts)
 
 
-def select_model(prompt: str, client_requested_model: str = "") -> tuple[str, str]:
+def select_model(prompt: str, client_requested_model: str = "", is_subagent: bool = False) -> tuple[str, str]:
+    if is_subagent:
+        return PRO_MODEL, "4m"
     return DEFAULT_MODEL, "2m"
 
 
@@ -950,7 +962,7 @@ async def chat_completions(request: Request):
             })
 
     prompt = build_cached_prompt(messages, tools=tools)
-    chosen_model, initial_timeout = select_model(prompt, client_requested_model=client_model)
+    chosen_model, initial_timeout = select_model(prompt, client_requested_model=client_model, is_subagent=is_subagent)
 
     def postprocess_output(full_text: str) -> tuple[str, str, list]:
         """Extracts reasoning FIRST, then tool calls, and applies Main-Chat Background Delegation Guardrails."""
@@ -969,7 +981,8 @@ async def chat_completions(request: Request):
                 clean_text = extract_async_delegation_fallback(last_user_msg)
 
         # --- GUARDRAIL S: SUBAGENT HARD ITERATION LIMIT (PREVENT 500-MESSAGE LOOPS) ---
-        if is_subagent and len(messages) >= 32 and tool_calls:
+        sub_assistant_turns = sum(1 for m in messages if isinstance(m, dict) and m.get("role") == "assistant")
+        if is_subagent and sub_assistant_turns >= 30 and tool_calls:
             print(f"[SUBAGENT-GUARDRAIL] Subagent exceeded iteration limit ({len(messages)} messages). Suppressing tool calls to force completion!")
             tool_calls = []
             if not clean_text.strip():
